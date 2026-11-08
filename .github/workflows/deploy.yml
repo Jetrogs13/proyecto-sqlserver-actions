@@ -1,0 +1,64 @@
+name: Despliegue SQL Server en Docker
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  ACCEPT_EULA: Y
+  MSSQL_PID: Developer
+  SA_PASSWORD: ${{ secrets.MSSQL_SA_PASSWORD }}
+
+jobs:
+  deploy-database:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clonar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Iniciar contenedor de Microsoft SQL Server
+        run: |
+          docker run -d \
+            --name sqlserver \
+            -e ACCEPT_EULA="$ACCEPT_EULA" \
+            -e MSSQL_PID="$MSSQL_PID" \
+            -e MSSQL_SA_PASSWORD="$SA_PASSWORD" \
+            -p 1433:1433 \
+            mcr.microsoft.com/mssql/server:2022-latest
+
+      - name: Crear y copiar scripts SQL al contenedor
+        run: |
+          docker cp ./sql sqlserver:/sql
+
+          echo "Esperando a que SQL Server acepte conexiones..."
+          for i in {1..30}; do
+            if docker exec sqlserver /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$SA_PASSWORD" -Q "SELECT 1" > /dev/null 2>&1; then
+              echo "SQL Server está listo."
+              break
+            fi
+            echo "Intento $i: esperando 2 segundos..."
+            sleep 2
+          done
+
+      - name: Ejecutar scripts SQL
+        run: |
+          SQLCMD="/opt/mssql-tools18/bin/sqlcmd -C -b"
+
+          echo "Creando base de datos..."
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/create_database.sql
+
+          echo "Creando tablas y tipos..."
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/create_tables.sql
+
+          echo "Creando procedimiento almacenado..."
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/create_procedure.sql
+
+          echo "Creando trigger..."
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/create_trigger.sql
+
+          echo "Insertando datos de prueba y verificando..."
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/test_data.sql

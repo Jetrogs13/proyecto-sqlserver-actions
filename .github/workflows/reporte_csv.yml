@@ -1,0 +1,61 @@
+name: Reporte CSV de Ventas e inventario
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+env:
+  ACCEPT_EULA: Y
+  MSSQL_PID: Developer
+  SA_PASSWORD: ${{ secrets.MSSQL_SA_PASSWORD }}
+
+jobs:
+  generar-reporte-csv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clonar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Levantar contenedor SQL Server y cargar datos
+        run: |
+          docker run -d \
+            --name sqlserver \
+            -e ACCEPT_EULA="$ACCEPT_EULA" \
+            -e MSSQL_PID="$MSSQL_PID" \
+            -e MSSQL_SA_PASSWORD="$SA_PASSWORD" \
+            -p 1433:1433 \
+            mcr.microsoft.com/mssql/server:2022-latest
+
+          docker cp ./sql sqlserver:/sql
+
+          for i in {1..30}; do
+            if docker exec sqlserver /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$SA_PASSWORD" -Q "SELECT 1" > /dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+
+          SQLCMD="/opt/mssql-tools18/bin/sqlcmd -C -b"
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/create_database.sql
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/create_tables.sql
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/create_procedure.sql
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/create_trigger.sql
+          docker exec sqlserver $SQLCMD -S localhost -U sa -P "$SA_PASSWORD" -i /sql/test_data.sql
+
+      - name: Exportar consulta a archivo
+        run: |
+          QUERY="SET NOCOUNT ON; SELECT v.VentaID, v.Producto, v.Cantidad, CONVERT(VARCHAR(19), v.Fecha, 120) AS FechaVenta, i.Stock AS StockRestante, a.Mensaje AS EstadoAuditoria FROM EmpresaDB.dbo.Ventas v INNER JOIN EmpresaDB.dbo.Inventario i ON v.Producto = i.Producto INNER JOIN EmpresaDB.dbo.AuditoriaVentas a ON v.VentaID = a.VentaID;"
+          
+          docker exec sqlserver /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$SA_PASSWORD" -Q "$QUERY" -s "," -W | sed '2d' > reporte_ventas.csv
+
+          echo "Contenido del CSV generado:"
+          cat reporte_ventas.csv
+
+      - name: Publicar CSV en GitHub Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-ventas-csv
+          path: reporte_ventas.csv
+          retention-days: 30
